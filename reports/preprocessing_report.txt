@@ -1,0 +1,13 @@
+VoltGuard Module 1 - Data Preprocessing Report
+==============================================
+Dataset Name: Simulated ICS/SCADA Water Tank & Process Dataset
+Total Records (Raw): 5005
+Total Records (Cleaned): 5000
+Missing Values Cleaned: 6
+Duplicate Rows Removed: 5
+
+Dataset Statistics:
+- Training Samples: 4000
+- Testing Samples: 1000
+- Normal Traffic Count: 4750
+- Attack Traffic Count: 250

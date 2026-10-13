@@ -1,0 +1,39 @@
+VoltGuard ICS/SCADA Intrusion Detection
+========================================
+Dataset: Simulated ICS/SCADA data
+Model: Random Forest
+Training rows: 4000
+Testing rows: 1000
+Features: Tank_Water_Level, Pressure_Sensor, Flow_Rate, Valve_Status
+
+Accuracy:  1.0000
+Precision: 1.0000
+Recall:    1.0000
+F1-score:  1.0000
+
+Confusion Matrix (actual rows, predicted columns):
+                 Predicted Normal  Predicted Attack
+Actual Normal                 946                 0
+Actual Attack                   0                54
+
+Classification Report:
+                  precision    recall  f1-score   support
+
+          Normal       1.00      1.00      1.00       946
+Simulated Attack       1.00      1.00      1.00        54
+
+        accuracy                           1.00      1000
+       macro avg       1.00      1.00      1.00      1000
+    weighted avg       1.00      1.00      1.00      1000
+
+
+Feature Importance:
+         Feature  Importance
+Tank_Water_Level    0.507584
+ Pressure_Sensor    0.491090
+       Flow_Rate    0.001317
+    Valve_Status    0.000009
+
+Limitation:
+These results measure performance on the supplied simulated dataset.
+They do not establish performance on real industrial systems.
