@@ -1,0 +1,7 @@
+Feature_Name,Data_Type,Description
+Timestamp,datetime,Exact timestamp of the sensor reading
+Tank_Water_Level,float,"Water level in meters (Normal: 40-60, Violation > 70)"
+Pressure_Sensor,float,System pressure in PSI
+Flow_Rate,float,Liquid flow rate through pipes
+Valve_Status,int,"Valve state (0: Closed, 1: Open)"
+Attack_Label,int,"Classification label (0: Normal, 1: Intrusion/Attack)"
