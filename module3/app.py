@@ -51,7 +51,7 @@ for lvl in ["Low", "Medium", "High", "Critical"]:
                              marker=dict(color=COLORS[lvl], size=5),
                              text=s["alert_reason"], hoverinfo="text+x+y"))
 fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10))
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 l, r = st.columns(2)
 with l:
@@ -59,25 +59,25 @@ with l:
     f2 = px.scatter(res, x="timestamp", y="ai_score", color="final_severity",
                     color_discrete_map=COLORS, opacity=0.7, height=300)
     f2.add_hline(y=thr, line_dash="dash")
-    st.plotly_chart(f2, use_container_width=True)
+    st.plotly_chart(f2, width="stretch")
 with r:
     st.subheader("Rule violations")
     rc = {k: int(res["rules_triggered"].str.contains(k).sum()) for k in RULES}
     st.plotly_chart(px.bar(x=list(rc.values()), y=list(rc.keys()), orientation="h", height=300,
-                           labels={"x": "samples", "y": ""}), use_container_width=True)
+                           labels={"x": "samples", "y": ""}), width="stretch")
 
 st.subheader("Incidents")
-st.dataframe(inc, use_container_width=True, hide_index=True)
+st.dataframe(inc, width="stretch", hide_index=True)
 
 st.subheader("Alert log")
 sev_f = st.multiselect("Severity filter", LEVELS[1:], default=["Medium", "High", "Critical"])
 log = res[res["final_severity"].isin(sev_f)][
     ["timestamp", "final_severity", "ai_score", "physics_severity", "alert_reason"]]
-st.dataframe(log, use_container_width=True, hide_index=True)
+st.dataframe(log, width="stretch", hide_index=True)
 st.download_button("Download alerts CSV", res.to_csv(index=False), "alerts.csv")
 
 ev = evaluate(res)
 if ev is not None:
     st.subheader("Evaluation vs ground truth (simulation)")
-    st.dataframe(ev, use_container_width=True, hide_index=True)
+    st.dataframe(ev, width="stretch", hide_index=True)
     st.caption("Shows why combining AI + physics beats either alone.")
