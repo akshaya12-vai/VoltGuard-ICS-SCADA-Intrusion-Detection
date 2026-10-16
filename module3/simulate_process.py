@@ -1,5 +1,6 @@
 """Simulates an 11 kV substation feeder (offline, safe) with injected attacks.
-Also produces a MOCK Module 2 output (ai_score) so Module 3 runs standalone."""
+Also produces a MOCK Module 2 output (ai_score) so Module 3 runs standalone.
+WARNING: ai_score is hand-crafted, so evaluation on it shows the design, not real accuracy."""
 import numpy as np
 import pandas as pd
 
