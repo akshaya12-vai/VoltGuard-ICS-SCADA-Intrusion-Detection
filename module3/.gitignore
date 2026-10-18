@@ -1,0 +1,25 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated output files (recreated by run_pipeline.py)
+alerts.csv
+incidents.csv
+review_queue.csv
+process_data.csv
+
+# Large or restricted datasets (cite the source in the README instead)
+data/
+*.zip
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
