@@ -12,3 +12,8 @@ transformer_temp_c, breaker_status, ai_score.  Upload it in the dashboard sideba
 simulate_process.py (simulated process + mock AI) | physics_rules.py (rules R1-R9)
 alert_engine.py (fusion, incidents, evaluation) | app.py (dashboard)
 Offline/simulated data only. Do not connect to live control equipment.
+
+# run command
+cd module3
+pip install -r requirements.txt
+streamlit run app.py

@@ -10,7 +10,7 @@ Fusion matrix (transparent & documented):
   nothing                           -> Normal
 """
 import pandas as pd
-from physics_rules import apply_rules, validate_input
+from physics_rules import apply_rules, validate_input, CONFIG
 
 LEVELS = ["Normal", "Low", "Medium", "High", "Critical"]
 
@@ -33,9 +33,8 @@ def join_module2(process_df, preds_df, on="timestamp", tolerance="1s"):
     out["ai_score"] = out["ai_score"].fillna(0.0)
     return out
 
-
-def run_pipeline(df, ai_threshold=0.5):
-    d = apply_rules(validate_input(df))
+def run_pipeline(df, ai_threshold=0.5, cfg=None):
+    d = apply_rules(validate_input(df), cfg or CONFIG)
     if "ai_score" not in d:
         d["ai_score"] = 0.0
     d["ai_flag"] = d["ai_score"] >= ai_threshold
