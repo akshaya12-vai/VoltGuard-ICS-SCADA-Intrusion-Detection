@@ -1,7 +1,7 @@
 """VoltGuard Module 3 dashboard.  Run:  streamlit run app.py"""
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+from plotly.subplots import make_subplots
 import streamlit as st
 from simulate_process import simulate
 from alert_engine import (run_pipeline, build_incidents, evaluate, evaluate_by_attack,
@@ -9,123 +9,250 @@ from alert_engine import (run_pipeline, build_incidents, evaluate, evaluate_by_a
 from physics_rules import RULES, CONFIG, RULE_THRESHOLDS, SEVERITY_NAMES
 
 st.set_page_config(page_title="VoltGuard", page_icon="⚡", layout="wide")
-st.title("⚡ VoltGuard – Physics-Aware ICS/SCADA Alert Dashboard")
-st.caption("Academic prototype • offline/simulated data only • not a validated safety product")
 
-COLORS = {"Normal": "#2ecc71", "Low": "#3498db", "Medium": "#f1c40f",
-          "High": "#e67e22", "Critical": "#e74c3c"}
+# ---- design tokens -------------------------------------------------------
+COLORS = {"Normal": "#4CAF8E", "Low": "#5B9BD5", "Medium": "#E3B341",
+          "High": "#E8833A", "Critical": "#E5484D"}
+PANEL, INK, MUTED, GRID = "#1C2B38", "#E6EDF2", "#8CA0B0", "#2C3E4D"
+
+
+def rgba(hex_color, a):
+    h = hex_color.lstrip("#")
+    return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
+
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700&family=Source+Sans+3:wght@400;600&display=swap');
+html, body, [class*="css"], .stMarkdown, .stDataFrame {{ font-family: 'Source Sans 3', sans-serif; }}
+h1, h2, h3, .vg-num, .vg-head {{ font-family: 'Barlow', sans-serif !important; letter-spacing: 0.01em; }}
+#MainMenu, footer {{ visibility: hidden; }}
+.block-container {{ padding-top: 2rem; max-width: 1400px; }}
+.vg-title {{ display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:.5rem; }}
+.vg-title h1 {{ margin:0; padding:0; font-size:2rem; }}
+.vg-chip {{ background:{PANEL}; border:1px solid {GRID}; border-radius:999px; padding:.2rem .8rem;
+            font-size:.85rem; color:{MUTED}; }}
+.vg-banner {{ border-left:8px solid var(--c); background:var(--bg); border-radius:6px;
+              padding:1rem 1.4rem; margin:1rem 0; }}
+.vg-banner .vg-head {{ font-size:1.7rem; font-weight:600; line-height:1.2; }}
+.vg-banner .vg-sub {{ color:{MUTED}; margin-top:.25rem; max-width:75ch; }}
+.vg-tiles {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:.75rem; margin-bottom:1rem; }}
+.vg-tile {{ background:{PANEL}; border-radius:6px; padding:.7rem 1rem; border-bottom:4px solid var(--c); }}
+.vg-tile .vg-num {{ font-size:2rem; font-weight:600; line-height:1.1; }}
+.vg-tile .vg-lab {{ color:{MUTED}; font-size:.9rem; }}
+.vg-note {{ border-left:4px solid {COLORS['Medium']}; background:{rgba(COLORS['Medium'], .1)};
+            padding:.6rem 1rem; border-radius:4px; margin-bottom:1rem; }}
+button:focus-visible, [role="tab"]:focus-visible {{ outline:2px solid {COLORS['Low']} !important; outline-offset:2px; }}
+</style>
+""", unsafe_allow_html=True)
+
+
+def style_fig(fig, height):
+    fig.update_layout(height=height, margin=dict(l=10, r=10, t=10, b=10),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font=dict(color=INK, family="Source Sans 3, sans-serif"),
+                      legend=dict(orientation="h", y=1.08, x=0))
+    fig.update_xaxes(gridcolor=GRID, zeroline=False)
+    fig.update_yaxes(gridcolor=GRID, zeroline=False)
+    return fig
+
+
+# ---- sidebar: data and settings -----------------------------------------
 simulated = False
-
 with st.sidebar:
-    st.header("Data source")
-    src = st.radio("Input", ["Simulated process", "Upload CSV (process + ai_score)",
-                             "Upload process CSV + Module 2 predictions"])
-    thr = st.slider("AI score threshold", 0.1, 0.95, 0.5, 0.05)
-    min_sev = st.selectbox("Incident min severity", LEVELS[1:], index=1)
-    gap = st.number_input("Merge gap (samples)", 0, 60, 5)
+    st.header("Data")
+    src = st.radio("Source", ["Simulated feeder", "One CSV with ai_score",
+                              "Process CSV + Module 2 CSV"], label_visibility="collapsed")
+    st.header("Alert settings")
+    thr = st.slider("AI score threshold", 0.1, 0.95, 0.5, 0.05,
+                    help="Samples at or above this score count as AI-flagged.")
+    min_sev = st.selectbox("Incidents start at", LEVELS[1:], index=1,
+                           help="Lowest severity that opens an incident.")
+    gap = st.number_input("Merge alerts closer than (samples)", 0, 60, 5)
     try:
         if src.startswith("Sim"):
             seed = st.number_input("Random seed", 0, 9999, 42)
             df = simulate(seed=int(seed)); simulated = True
-        elif "predictions" in src:
-            p = st.file_uploader("Process CSV (timestamp + 7 process columns)", type="csv", key="p")
+        elif src.startswith("Process"):
+            p = st.file_uploader("Process CSV", type="csv", key="p",
+                                 help="timestamp, voltage_kv, current_a, frequency_hz, power_mw, "
+                                      "power_factor, transformer_temp_c, breaker_status")
             m = st.file_uploader("Module 2 CSV (timestamp, ai_score)", type="csv", key="m")
-            tol = st.text_input("Join tolerance", "1s")
+            tol = st.text_input("Match timestamps within", "1s")
             if not (p and m):
-                st.info("Upload both files."); st.stop()
+                st.info("Upload both files to continue."); st.stop()
             df = join_module2(pd.read_csv(p, parse_dates=["timestamp"]),
                               pd.read_csv(m, parse_dates=["timestamp"]), tolerance=tol)
         else:
-            up = st.file_uploader("CSV with timestamp, voltage_kv, current_a, frequency_hz, "
-                                  "power_mw, power_factor, transformer_temp_c, breaker_status, ai_score",
-                                  type="csv")
+            up = st.file_uploader("CSV file", type="csv",
+                                  help="timestamp, voltage_kv, current_a, frequency_hz, power_mw, "
+                                       "power_factor, transformer_temp_c, breaker_status, ai_score")
             if not up:
-                st.info("Upload a CSV or switch to simulated data."); st.stop()
+                st.info("Upload a CSV or switch to the simulated feeder."); st.stop()
             df = pd.read_csv(up, parse_dates=["timestamp"])
         res = run_pipeline(df, thr)
     except ValueError as e:
-        st.error(f"Input problem: {e}"); st.stop()
+        st.error(f"Could not read the data: {e}"); st.stop()
     if res.attrs.get("dropped_rows"):
-        st.warning(f"Dropped {res.attrs['dropped_rows']} invalid rows.")
+        st.warning(f"Skipped {res.attrs['dropped_rows']} rows with missing or invalid values.")
 
 inc = build_incidents(res, min_sev, int(gap))
 counts = res["final_severity"].value_counts()
+source_label = "Simulated 11 kV feeder" if simulated else "Uploaded data"
+
+# ---- header ---------------------------------------------------------------
+st.markdown(f"""
+<div class="vg-title"><h1>⚡ VoltGuard</h1>
+<span class="vg-chip">{source_label}, {len(res):,} samples, {res['timestamp'].iloc[0]:%d %b %H:%M} to {res['timestamp'].iloc[-1]:%H:%M}</span></div>
+<div style="color:{MUTED}">Physics-aware alerts for ICS/SCADA feeders. Offline prototype, not a validated safety product.</div>
+""", unsafe_allow_html=True)
+
+# ---- status banner --------------------------------------------------------
+if inc.empty:
+    top, head = "Normal", "No incidents found"
+    sub = "All process readings stayed within the documented limits."
+else:
+    top = max(inc["max_severity"], key=LEVELS.index)
+    n = len(inc)
+    head = f"{top}: {n} incident{'s' if n != 1 else ''} need{'' if n != 1 else 's'} review"
+    worst = inc.iloc[[LEVELS.index(s) for s in inc["max_severity"]].index(LEVELS.index(top))]
+    sub = (f"Most severe starts {worst['start']:%H:%M:%S} and lasts {worst['duration_s']} s. "
+           f"Rules involved: {worst['rules']}.")
+st.markdown(f"""<div class="vg-banner" style="--c:{COLORS[top]};--bg:{rgba(COLORS[top], .12)}">
+<div class="vg-head">{head}</div><div class="vg-sub">{sub}</div></div>""", unsafe_allow_html=True)
 
 if simulated:
-    st.warning("The AI score here is a hand-crafted mock. Evaluation shows the design, "
-               "not real model performance. Use Module 2's scores for real results.")
+    st.markdown("""<div class="vg-note">The AI score here is a hand-made mock, so the results show how the
+design works, not real model accuracy. Load Module 2's scores for real results.</div>""",
+                unsafe_allow_html=True)
 
-c = st.columns(5)
-for col, lvl in zip(c, LEVELS[::-1]):
-    col.metric(lvl, int(counts.get(lvl, 0)))
+tiles = "".join(
+    f'<div class="vg-tile" style="--c:{COLORS[l]}"><div class="vg-num">{int(counts.get(l, 0)):,}</div>'
+    f'<div class="vg-lab">{l} samples</div></div>' for l in LEVELS[::-1])
+st.markdown(f'<div class="vg-tiles">{tiles}</div>', unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["Signals", "Incidents & alerts", "Rules", "Evaluation"])
+tab1, tab2, tab3, tab4 = st.tabs(["Timeline", "Incidents", "Rules", "Evaluation"])
 
+LIMITS = {"current_a": ["i_max"], "voltage_kv": ["v_min", "v_max"], "frequency_hz": ["f_min", "f_max"],
+          "transformer_temp_c": ["temp_max"], "power_factor": ["pf_min", "pf_max"]}
+SIGNALS = {"Current (A)": "current_a", "Voltage (kV)": "voltage_kv", "Power (MW)": "power_mw",
+           "Transformer temperature (°C)": "transformer_temp_c", "Frequency (Hz)": "frequency_hz",
+           "Power factor": "power_factor"}
+
+# ---- timeline tab ---------------------------------------------------------
 with tab1:
-    sig = st.selectbox("Signal", ["current_a", "voltage_kv", "power_mw", "transformer_temp_c",
-                                  "frequency_hz", "power_factor"])
-    fig = go.Figure(go.Scatter(x=res["timestamp"], y=res[sig], mode="lines", name=sig,
-                               line=dict(color="#7f8c8d", width=1)))
+    label = st.selectbox("Signal", list(SIGNALS))
+    sig = SIGNALS[label]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.1, 0.9], vertical_spacing=0.03)
+    sev_idx = res["final_severity"].map(LEVELS.index)
+    fig.add_trace(go.Heatmap(
+        x=res["timestamp"], y=["Severity"], z=[sev_idx.tolist()], zmin=0, zmax=4, showscale=False,
+        colorscale=[[k / 4, COLORS[l]] for k, l in enumerate(LEVELS)],
+        text=[res["final_severity"].tolist()], hovertemplate="%{x}<br>%{text}<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=res["timestamp"], y=res[sig], mode="lines", name=label,
+                             line=dict(color=MUTED, width=1.2)), row=2, col=1)
     for lvl in ["Low", "Medium", "High", "Critical"]:
         s = res[res["final_severity"] == lvl]
-        fig.add_trace(go.Scatter(x=s["timestamp"], y=s[sig], mode="markers", name=lvl,
-                                 marker=dict(color=COLORS[lvl], size=5),
-                                 text=s["alert_reason"], hoverinfo="text+x+y"))
-    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10))
+        if len(s):
+            fig.add_trace(go.Scatter(x=s["timestamp"], y=s[sig], mode="markers", name=lvl,
+                                     marker=dict(color=COLORS[lvl], size=6),
+                                     text=s["alert_reason"], hovertemplate="%{x}<br>%{text}<extra></extra>"),
+                          row=2, col=1)
+    for key in LIMITS.get(sig, []):
+        fig.add_hline(y=CONFIG[key], line_dash="dash", line_color=COLORS["High"], opacity=0.7,
+                      annotation_text=f"limit {CONFIG[key]}", annotation_font_color=MUTED, row=2, col=1)
+    style_fig(fig, 520)
     st.plotly_chart(fig, use_container_width=True)
-    l, r = st.columns(2)
-    with l:
-        st.subheader("AI score vs time")
-        f2 = px.scatter(res, x="timestamp", y="ai_score", color="final_severity",
-                        color_discrete_map=COLORS, opacity=0.7, height=300)
-        f2.add_hline(y=thr, line_dash="dash")
-        st.plotly_chart(f2, use_container_width=True)
-    with r:
-        st.subheader("Rule violations")
-        rc = {k: int(res["rules_triggered"].str.contains(k).sum()) for k in RULES}
-        st.plotly_chart(px.bar(x=list(rc.values()), y=list(rc.keys()), orientation="h", height=300,
-                               labels={"x": "samples", "y": ""}), use_container_width=True)
+    st.caption("The colour strip on top shows alert severity over time. Dashed lines are the physics limits.")
 
+# ---- incidents tab --------------------------------------------------------
 with tab2:
-    st.subheader(f"Incidents ({min_sev}+, gaps ≤ {int(gap)} merged)")
-    st.dataframe(inc, use_container_width=True, hide_index=True)
-    st.download_button("Download incidents CSV", inc.to_csv(index=False), "incidents.csv")
+    st.subheader(f"Incidents ({min_sev} and above)")
+    if inc.empty:
+        st.info("No incidents. Lower the “Incidents start at” setting to see lower-severity alerts.")
+    else:
+        st.dataframe(inc, use_container_width=True, hide_index=True, column_config={
+            "start": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
+            "end": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+            "duration_s": st.column_config.NumberColumn("Seconds"),
+            "alert_samples": st.column_config.NumberColumn("Alert samples"),
+            "max_severity": st.column_config.TextColumn("Severity"),
+            "rules": st.column_config.TextColumn("Rules triggered", width="large"),
+            "avg_ai_score": st.column_config.ProgressColumn("Avg AI score", min_value=0, max_value=1,
+                                                            format="%.2f"),
+        })
+        st.download_button("Download incidents", inc.to_csv(index=False), "incidents.csv")
+
+        st.subheader("Incident detail")
+        pick = st.selectbox("Choose an incident", inc["incident"].tolist(),
+                            format_func=lambda k: f"Incident {k}: {inc.loc[inc.incident == k, 'max_severity'].iloc[0]}, "
+                                                  f"{inc.loc[inc.incident == k, 'start'].iloc[0]:%H:%M:%S}")
+        row = inc[inc["incident"] == pick].iloc[0]
+        pad = pd.Timedelta(seconds=60)
+        w = res[(res["timestamp"] >= row["start"] - pad) & (res["timestamp"] <= row["end"] + pad)]
+        inside = w[(w["timestamp"] >= row["start"]) & (w["timestamp"] <= row["end"])]
+        panels = [("Current (A)", "current_a"), ("Voltage (kV)", "voltage_kv"),
+                  ("Power (MW)", "power_mw"), ("Temperature (°C)", "transformer_temp_c")]
+        f3 = make_subplots(rows=len(panels), cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                           subplot_titles=[p[0] for p in panels])
+        for k, (_, col) in enumerate(panels, 1):
+            f3.add_trace(go.Scatter(x=w["timestamp"], y=w[col], mode="lines", showlegend=False,
+                                    line=dict(color=INK, width=1.2)), row=k, col=1)
+            if col == "power_mw":
+                f3.add_trace(go.Scatter(x=w["timestamp"], y=w["power_calc_mw"], mode="lines",
+                                        name="Expected from V×I×pf",
+                                        line=dict(color=COLORS["Low"], width=1, dash="dot")), row=k, col=1)
+            f3.add_vrect(x0=row["start"], x1=row["end"], fillcolor=COLORS[row["max_severity"]],
+                         opacity=0.18, line_width=0, row=k, col=1)
+        style_fig(f3, 620)
+        st.plotly_chart(f3, use_container_width=True)
+        why = [r for r in inside["physics_reason"].unique() if r]
+        st.markdown("**Why it was flagged**")
+        for r in why:
+            st.markdown(f"- Physics: {r}")
+        if inside["ai_flag"].any():
+            st.markdown(f"- AI: suspicious traffic in {int(inside['ai_flag'].sum())} samples "
+                        f"(highest score {inside['ai_score'].max():.2f})")
+
     st.subheader("Alert log")
-    sev_f = st.multiselect("Severity filter", LEVELS[1:], default=["Medium", "High", "Critical"])
+    sev_f = st.multiselect("Show severities", LEVELS[1:], default=["Medium", "High", "Critical"])
     log = res[res["final_severity"].isin(sev_f)][
         ["timestamp", "final_severity", "ai_score", "physics_severity", "alert_reason"]]
     st.dataframe(log, use_container_width=True, hide_index=True)
-    st.download_button("Download alerts CSV", res.to_csv(index=False), "alerts.csv")
-    st.subheader("Review queue: AI-only alerts (physics normal)")
-    rq = review_queue(res)
-    st.caption(f"{len(rq)} possible false positives for analyst review.")
-    st.dataframe(rq, use_container_width=True, hide_index=True)
+    st.download_button("Download full alert data", res.to_csv(index=False), "alerts.csv")
 
+    rq = review_queue(res)
+    with st.expander(f"Review queue: {len(rq)} AI-only alerts where physics looks normal"):
+        st.caption("These may be false positives. An analyst should check them.")
+        st.dataframe(rq, use_container_width=True, hide_index=True)
+
+# ---- rules tab ------------------------------------------------------------
 with tab3:
-    st.subheader("Documented operating rules")
-    st.dataframe(pd.DataFrame([{"rule": k, "severity": f"{s} ({SEVERITY_NAMES[s]})",
-                                "threshold": RULE_THRESHOLDS[k], "description": d, "rationale": why}
+    st.subheader("Physics rules")
+    st.dataframe(pd.DataFrame([{"Rule": k, "Severity": f"{s} ({SEVERITY_NAMES[s]})",
+                                "Threshold": RULE_THRESHOLDS[k], "What it checks": d, "Why": why}
                                for k, (s, d, why) in RULES.items()]),
                  use_container_width=True, hide_index=True)
-    st.subheader("Fusion matrix")
+    st.subheader("How physics and AI results combine")
     st.dataframe(pd.DataFrame({
-        "Physics": ["Critical (4)", "High (3)", "High (3)", "Medium (2)", "Medium (2)", "Normal", "Normal"],
-        "AI flag": ["any", "yes", "no", "yes", "no", "yes", "no"],
-        "Final": ["Critical", "Critical", "High", "High", "Medium", "Low", "Normal"]}),
+        "Physics result": ["Critical", "High", "High", "Medium", "Medium", "Normal", "Normal"],
+        "AI flags it": ["Either", "Yes", "No", "Yes", "No", "Yes", "No"],
+        "Final alert": ["Critical", "Critical", "High", "High", "Medium", "Low (review)", "Normal"]}),
         use_container_width=True, hide_index=True)
-    with st.expander("Raw CONFIG values"):
+    with st.expander("Raw limit values"):
         st.json(CONFIG)
 
+# ---- evaluation tab -------------------------------------------------------
 with tab4:
     ev = evaluate(res)
     if ev is None:
-        st.info("No ground-truth `true_attack` column in this data, so no evaluation is available.")
+        st.info("This data has no `true_attack` column, so there is nothing to score against.")
     else:
-        st.subheader("Overall (per-sample)")
+        st.subheader("Overall results (per sample)")
         st.dataframe(ev, use_container_width=True, hide_index=True)
         bt = evaluate_by_attack(res)
         if bt is not None:
-            st.subheader("Recall by attack type")
+            st.subheader("Share of each attack type detected")
             st.dataframe(bt, use_container_width=True, hide_index=True)
-        st.caption("Limitations: synthetic data; rules were written with the attacks in mind, so "
-                   "physics-only scores are optimistic; metrics are per-sample, not per-incident.")
+        st.caption("Limits: synthetic data, rules written with these attacks in mind (physics-only is "
+                   "optimistic), and scores are per sample, not per incident.")
