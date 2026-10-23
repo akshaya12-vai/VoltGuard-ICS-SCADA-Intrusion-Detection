@@ -16,6 +16,8 @@ CONFIG = {
     "di_max": 80.0,                        # A per sample (rate of change)
     "frozen_window": 20,                   # samples with zero variance
     "breaker_open_current": 5.0,           # A flowing while breaker open
+    "cusum_k": 0.10,                       # MW of residual tolerated per sample (drift allowance)
+    "cusum_h": 1.5,                        # MW accumulated residual that raises the alarm
 }
 
 REQUIRED_COLUMNS = ["timestamp", "voltage_kv", "current_a", "frequency_hz", "power_mw",
@@ -41,6 +43,8 @@ RULES = {
                           "Load cannot jump by more than di_max in one sample."),
     "R9_FROZEN_SENSOR": (2, "Sensor values frozen (possible replay attack)",
                          "Real measurements always carry noise; zero variance suggests replay."),
+    "R10_POWER_DRIFT": (3, "Reported power slowly drifting from V x I x pf (stealthy injection)",
+                        "Small biases stay under R6's limit but add up; a CUSUM of the residual catches them."),
 }
 
 RULE_THRESHOLDS = {
@@ -48,6 +52,7 @@ RULE_THRESHOLDS = {
     "R3_OVERCURRENT": "> 400 A", "R4_OVERTEMP": "> 85 C", "R5_PF_RANGE": "0.80 - 1.00",
     "R6_POWER_MISMATCH": "> 0.40 MW", "R7_BREAKER_OPEN_FLOW": "breaker=0 and I > 5 A",
     "R8_RATE_OF_CHANGE": "> 80 A/sample", "R9_FROZEN_SENSOR": "std < 1e-6 over 20 samples",
+    "R10_POWER_DRIFT": "CUSUM of |P - calc| > 1.5 MW (k = 0.1)",
 }
 SEVERITY_NAMES = {1: "Low", 2: "Medium", 3: "High", 4: "Critical"}
 
@@ -81,6 +86,17 @@ def validate_input(df):
     return d
 
 
+def _cusum_alarm(resid, k, h):
+    """One-sided CUSUM on |residual|. Grows when |r| > k, decays 3x faster when |r| < k,
+    capped at 2h so the alarm clears soon after the drift ends."""
+    s, cap, out = 0.0, 2 * h, []
+    for x in resid.abs().to_numpy():
+        s = s + x - k if x >= k else max(0.0, s - 3 * (k - x))
+        s = min(s, cap)
+        out.append(s > h)
+    return pd.Series(out, index=resid.index)
+
+
 def apply_rules(df, cfg=CONFIG):
     d = df.copy()
     v, i = d["voltage_kv"], d["current_a"]
@@ -101,6 +117,7 @@ def apply_rules(df, cfg=CONFIG):
         "R7_BREAKER_OPEN_FLOW": (d["breaker_status"] == 0) & (i > cfg["breaker_open_current"]),
         "R8_RATE_OF_CHANGE": i.diff().abs() > cfg["di_max"],
         "R9_FROZEN_SENSOR": frozen,
+        "R10_POWER_DRIFT": _cusum_alarm(d["power_mw"] - p_calc, cfg["cusum_k"], cfg["cusum_h"]),
     }, index=d.index).fillna(False).astype(bool)
 
     sev = np.array([RULES[c][0] for c in hit.columns])

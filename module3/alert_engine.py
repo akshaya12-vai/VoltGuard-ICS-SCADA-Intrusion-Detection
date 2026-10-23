@@ -9,10 +9,32 @@ Fusion matrix (transparent & documented):
   AI flag only (physics normal)     -> Low  (possible false positive, review)
   nothing                           -> Normal
 """
+import numpy as np
 import pandas as pd
 from physics_rules import apply_rules, validate_input, CONFIG
 
 LEVELS = ["Normal", "Low", "Medium", "High", "Critical"]
+
+# Likely attack from the rules an incident triggered (first match wins).
+SIGNATURES = [
+    ("breaker_manipulation", "R7_BREAKER_OPEN_FLOW"),
+    ("overvoltage_injection", "R1_VOLTAGE_RANGE"),
+    ("replay_frozen_sensor", "R9_FROZEN_SENSOR"),
+    ("false_data_injection", "R6_POWER_MISMATCH"),
+    ("stealthy_power_drift", "R10_POWER_DRIFT"),
+    ("overload_or_frequency_fault", "R3_OVERCURRENT"),
+    ("overload_or_frequency_fault", "R2_FREQUENCY_RANGE"),
+]
+PHYS_BASE = {0: 0, 1: 20, 2: 40, 3: 65, 4: 85}
+
+
+def likely_attack(rules):
+    """rules: iterable of rule ids. Returns a readable guess, or 'unclassified anomaly'."""
+    rules = set(rules)
+    for name, rule in SIGNATURES:
+        if rule in rules:
+            return name
+    return "unclassified anomaly" if rules else "AI-only anomaly"
 
 
 def _fuse(phys, ai_flag):
@@ -33,6 +55,7 @@ def join_module2(process_df, preds_df, on="timestamp", tolerance="1s"):
     out["ai_score"] = out["ai_score"].fillna(0.0)
     return out
 
+
 def run_pipeline(df, ai_threshold=0.5, cfg=None):
     d = apply_rules(validate_input(df), cfg or CONFIG)
     if "ai_score" not in d:
@@ -46,6 +69,12 @@ def run_pipeline(df, ai_threshold=0.5, cfg=None):
         if r["ai_flag"]: parts.append(f"AI: suspicious traffic (score {r['ai_score']:.2f})")
         return " || ".join(parts)
     d["alert_reason"] = d.apply(reason, axis=1)
+    # Risk score 0-100 (for ranking only; final_severity stays the decision):
+    #   physics base (0/20/40/65/85) + 5 per extra rule (max 10) + 15*ai_score if AI-flagged else 5*ai_score
+    n_rules = d["rules_triggered"].map(lambda s: len([r for r in s.split(";") if r]))
+    bonus = ((n_rules - 1).clip(lower=0) * 5).clip(upper=10)
+    ai_part = np.where(d["ai_flag"], 15 * d["ai_score"], 5 * d["ai_score"])
+    d["risk_score"] = (d["physics_severity"].map(PHYS_BASE) + bonus + ai_part).clip(upper=100).round(1)
     return d
 
 
@@ -71,11 +100,13 @@ def build_incidents(d, min_severity="Medium", max_gap=5):
             "duration_s": int((g["timestamp"].iloc[-1] - g["timestamp"].iloc[0]).total_seconds()) + 1,
             "alert_samples": len(al),
             "max_severity": max(al["final_severity"], key=LEVELS.index),
+            "likely_attack": likely_attack(rules),
+            "max_risk": float(round(al["risk_score"].max())),
             "rules": ", ".join(rules) or "AI only",
             "avg_ai_score": round(g["ai_score"].mean(), 2),
         })
     return pd.DataFrame(rows, columns=["incident", "start", "end", "duration_s", "alert_samples",
-                                       "max_severity", "rules", "avg_ai_score"])
+                                       "max_severity", "likely_attack", "max_risk", "rules", "avg_ai_score"])
 
 
 def review_queue(d):
@@ -117,3 +148,43 @@ def evaluate_by_attack(d):
         rows.append({"attack_type": t, "samples": int(m.sum()),
                      **{k: round(float(v[m].mean()), 3) for k, v in methods.items()}})
     return pd.DataFrame(rows)
+
+
+def evaluate_incidents(d, inc):
+    """Incident-level scoring (needs true_attack): was each real attack detected, how fast,
+    was it named correctly, and how many incidents match no real attack?
+    Returns (per-attack DataFrame, summary dict) or (None, None)."""
+    if "true_attack" not in d:
+        return None, None
+    y = (d["true_attack"] == 1).to_numpy()
+    alert = (d["final_severity"].map(LEVELS.index) >= LEVELS.index("Medium")).to_numpy()
+    step = (d["timestamp"].iloc[1] - d["timestamp"].iloc[0]).total_seconds() if len(d) > 1 else 1.0
+    rows, spans, i = [], [], 0
+    while i < len(d):
+        if not y[i]:
+            i += 1; continue
+        j = i
+        while j + 1 < len(d) and y[j + 1] and d["attack_type"].iloc[j + 1] == d["attack_type"].iloc[i]:
+            j += 1
+        t0, t1 = d["timestamp"].iloc[i], d["timestamp"].iloc[j]
+        spans.append((t0, t1))
+        hit = np.flatnonzero(alert[i:j + 1])
+        m = inc[(inc["start"] <= t1) & (inc["end"] >= t0)] if len(inc) else inc
+        named = m.iloc[0]["likely_attack"] if len(m) else "-"
+        atk = d["attack_type"].iloc[i]
+        rows.append({"attack_type": atk, "start": t0, "end": t1,
+                     "detected": "Yes" if len(hit) else "No",
+                     "delay_s": float(hit[0] * step) if len(hit) else np.nan,
+                     "named_as": named,
+                     "named_correctly": ("Yes" if named == atk else "No") if len(hit) else "-"})
+        i = j + 1
+    seg = pd.DataFrame(rows, columns=["attack_type", "start", "end", "detected", "delay_s",
+                                      "named_as", "named_correctly"])
+    false_alarms = sum(1 for r in inc.itertuples()
+                       if not any(r.start <= t1 and r.end >= t0 for t0, t1 in spans)) if len(inc) else 0
+    det = seg[seg["detected"] == "Yes"]
+    summ = {"attacks": len(seg), "detected": len(det),
+            "mean_delay_s": float(det["delay_s"].mean()) if len(det) else float("nan"),
+            "correctly_named": int((seg["named_correctly"] == "Yes").sum()),
+            "false_alarm_incidents": int(false_alarms)}
+    return seg, summ
