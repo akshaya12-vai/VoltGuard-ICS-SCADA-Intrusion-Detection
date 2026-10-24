@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 
-def simulate(n=3000, seed=42):
+def simulate(n=3000, seed=42, hard=False):
     rng = np.random.default_rng(seed)
     x = np.arange(n)
     t = pd.date_range("2026-10-13 08:00:00", periods=n, freq="s")
@@ -47,6 +47,11 @@ def simulate(n=3000, seed=42):
     ai[2600:2650] = rng.uniform(0.40, 0.90, 50)
     mark(2600, 2650, "overvoltage_injection")
 
+    if hard:  # 5) Stealthy slow drift on power reading: stays under the 0.4 MW R6 limit, AI misses it
+        power[1100:1250] += np.linspace(0.15, 0.35, 150)
+        ai[1100:1250] = rng.uniform(0.05, 0.30, 150)
+        mark(1100, 1250, "stealthy_power_drift")
+
     # Benign AI false positives (physics is normal here)
     fp = rng.choice(np.where(attack == 0)[0], 15, replace=False)
     ai[fp] = rng.uniform(0.70, 0.90, 15)
@@ -58,6 +63,46 @@ def simulate(n=3000, seed=42):
         "ai_score": ai,                       # <- replace with Module 2 output
         "true_attack": attack, "attack_type": atype,
     })
+
+
+ATTACK_KINDS = ["false_data_injection", "stealthy_power_drift", "breaker_manipulation",
+                "replay_frozen_sensor", "overvoltage_injection"]
+
+
+def inject_attack(df, kind, start, length, strength=0.5, ai_sees=False, seed=0):
+    """Return a copy of df with a custom attack injected (labels and a matching mock ai_score).
+    strength 0.1-1.0 scales false_data_injection (6 MW x s), stealthy_power_drift (0.7 MW x s)
+    and overvoltage_injection (11 + 5 x s kV); breaker and replay ignore it."""
+    if kind not in ATTACK_KINDS:
+        raise ValueError(f"Unknown attack kind: {kind}")
+    d, rng = df.copy(), np.random.default_rng(seed)
+    s = int(max(0, min(start, len(d) - 1))); e = int(min(len(d), s + max(1, int(length)))); L = e - s
+
+    def add(col, vals):
+        arr = d[col].to_numpy(dtype=float).copy(); arr[s:e] += vals; d[col] = arr
+
+    def put(col, vals):
+        arr = d[col].to_numpy().copy(); arr[s:e] = vals; d[col] = arr
+
+    if kind == "false_data_injection":
+        add("power_mw", 6.0 * strength)
+    elif kind == "stealthy_power_drift":
+        add("power_mw", np.linspace(0.5, 1.0, L) * 0.7 * strength)
+    elif kind == "breaker_manipulation":
+        put("breaker_status", 0)
+    elif kind == "replay_frozen_sensor":
+        for c in ("current_a", "voltage_kv"):
+            put(c, d[c].iloc[s])
+    else:  # overvoltage_injection
+        put("voltage_kv", 11 + 5 * strength + rng.normal(0, 0.03, L))
+        add("transformer_temp_c", np.linspace(0, 35, L))
+    if "ai_score" not in d:
+        d["ai_score"] = 0.0
+    put("ai_score", rng.uniform(0.6, 0.95, L) if ai_sees else rng.uniform(0.05, 0.3, L))
+    if "true_attack" not in d:
+        d["true_attack"] = 0; d["attack_type"] = "normal"
+    put("true_attack", 1); put("attack_type", kind)
+    return d
 
 
 if __name__ == "__main__":

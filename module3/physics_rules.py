@@ -97,7 +97,7 @@ def _cusum_alarm(resid, k, h):
     return pd.Series(out, index=resid.index)
 
 
-def apply_rules(df, cfg=CONFIG):
+def apply_rules(df, cfg=CONFIG, disabled=()):
     d = df.copy()
     v, i = d["voltage_kv"], d["current_a"]
     p_calc = np.sqrt(3) * v * i * d["power_factor"] / 1000
@@ -120,6 +120,10 @@ def apply_rules(df, cfg=CONFIG):
         "R10_POWER_DRIFT": _cusum_alarm(d["power_mw"] - p_calc, cfg["cusum_k"], cfg["cusum_h"]),
     }, index=d.index).fillna(False).astype(bool)
 
+    for c in disabled:                      # ablation: switch chosen rules off
+        if c in hit.columns:
+            hit[c] = False
+
     sev = np.array([RULES[c][0] for c in hit.columns])
     d["physics_severity"] = (hit.values * sev).max(axis=1).astype(int)
     d["rules_triggered"] = hit.apply(lambda r: ";".join(c for c in hit.columns if r[c]), axis=1)
@@ -127,3 +131,23 @@ def apply_rules(df, cfg=CONFIG):
         lambda r: " | ".join(RULES[c][1] for c in hit.columns if r[c]), axis=1)
     d["power_calc_mw"] = p_calc
     return d
+
+
+def data_quality(df):
+    """Quick health check of a raw input table (before validate_input cleans it)."""
+    cols = [c for c in REQUIRED_COLUMNS if c in df.columns and c != "timestamp"]
+    num = df[cols].apply(pd.to_numeric, errors="coerce") if cols else pd.DataFrame()
+    out = {"rows": len(df), "missing_values": int(num.isna().sum().sum()), "duplicate_timestamps": 0,
+           "out_of_order": 0, "gaps": 0, "median_interval_s": float("nan")}
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        out["missing_values"] += int(ts.isna().sum())
+        out["duplicate_timestamps"] = int(ts.duplicated().sum())
+        dt = ts.diff().dt.total_seconds().dropna()
+        out["out_of_order"] = int((dt < 0).sum())
+        pos = dt[dt > 0]
+        if len(pos):
+            med = float(pos.median())
+            out["median_interval_s"] = med
+            out["gaps"] = int((pos > 2 * med).sum())
+    return out

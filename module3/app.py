@@ -3,10 +3,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-from simulate_process import simulate
+from simulate_process import simulate, inject_attack, ATTACK_KINDS
 from alert_engine import (run_pipeline, build_incidents, evaluate, evaluate_by_attack,
-                          review_queue, join_module2, LEVELS)
-from physics_rules import RULES, CONFIG, RULE_THRESHOLDS, SEVERITY_NAMES
+                          review_queue, join_module2, evaluate_incidents, threshold_sweep, playbook_for, LEVELS)
+from physics_rules import RULES, CONFIG, RULE_THRESHOLDS, SEVERITY_NAMES, data_quality
 
 st.set_page_config(page_title="VoltGuard", page_icon="⚡", layout="wide")
 
@@ -83,10 +83,25 @@ with st.sidebar:
         p_tol = st.slider("Power mismatch tolerance (MW)", 0.1, 1.0, CONFIG["power_tol_mw"], 0.05)
     cfg = dict(CONFIG, v_min=11 * (1 - tol / 100), v_max=11 * (1 + tol / 100),
                i_max=float(i_max), temp_max=float(t_max), power_tol_mw=float(p_tol))
+    with st.expander("Switch rules off (ablation)"):
+        off = st.multiselect("Rules to disable", list(RULES),
+                             help="See what is missed without a rule. Alerts and evaluation update at once.")
     try:
         if src.startswith("Sim"):
             seed = st.number_input("Random seed", 0, 9999, 42)
-            df = simulate(seed=int(seed)); simulated = True
+            hard = st.checkbox("Add a hard-to-detect attack (slow power drift)",
+                               help="A small bias that stays under the power-mismatch limit and that the mock AI misses. "
+                                    "Rule R10 (CUSUM) is built to catch it.")
+            df = simulate(seed=int(seed), hard=hard); simulated = True
+            with st.expander("Inject a custom attack"):
+                if st.checkbox("Enable injection"):
+                    kind = st.selectbox("Attack type", ATTACK_KINDS)
+                    a_start = st.slider("Start (sample)", 0, len(df) - 20, 300)
+                    a_len = st.slider("Length (samples)", 10, 300, 60)
+                    a_str = st.slider("Strength", 0.1, 1.0, 0.5, 0.05,
+                                      help="Scales the size of the false value. Breaker and replay ignore it.")
+                    a_ai = st.checkbox("AI also notices it", value=False)
+                    df = inject_attack(df, kind, a_start, a_len, a_str, a_ai)
         elif src.startswith("Process"):
             p = st.file_uploader("Process CSV", type="csv", key="p",
                                  help="timestamp, voltage_kv, current_a, frequency_hz, power_mw, "
@@ -104,13 +119,14 @@ with st.sidebar:
             if not up:
                 st.info("Upload a CSV or switch to the simulated feeder."); st.stop()
             df = pd.read_csv(up, parse_dates=["timestamp"])
-        res = run_pipeline(df, thr, cfg)
+        res = run_pipeline(df, thr, cfg, off)
     except ValueError as e:
         st.error(f"Could not read the data: {e}"); st.stop()
     if res.attrs.get("dropped_rows"):
         st.warning(f"Skipped {res.attrs['dropped_rows']} rows with missing or invalid values.")
 
 n = len(res)
+dq = data_quality(df)
 inc = build_incidents(res, min_sev, int(gap))
 inc = inc.assign(status=[st.session_state.get(f"tri_{k}", "Not reviewed") for k in inc["incident"]])
 counts = res["final_severity"].value_counts()
@@ -142,6 +158,22 @@ def timeline_fig(d, sig, label, height):
     return style_fig(fig, height)
 
 
+def strips_fig(d):
+    """Stacked strips: real attack, AI only, physics only, combined, on a shared time axis."""
+    cs = [[k / 4, COLORS[l]] for k, l in enumerate(LEVELS)]
+    rows = []
+    if "true_attack" in d:
+        rows.append(("Real attack", d["true_attack"].astype(int), [[0, PANEL], [1, COLORS["Critical"]]], 1))
+    rows.append(("AI only", d["ai_flag"].astype(int), [[0, PANEL], [1, COLORS["Low"]]], 1))
+    rows.append(("Physics only", d["physics_severity"], cs, 4))
+    rows.append(("Combined", d["final_severity"].map(LEVELS.index), cs, 4))
+    fig = make_subplots(rows=len(rows), cols=1, shared_xaxes=True, vertical_spacing=0.04)
+    for k, (name, z, scale, zmax) in enumerate(rows, 1):
+        fig.add_trace(go.Heatmap(x=d["timestamp"], y=[name], z=[z.tolist()], zmin=0, zmax=zmax, showscale=False,
+                                 colorscale=scale, hovertemplate="%{x}<br>" + name + "<extra></extra>"), row=k, col=1)
+    return style_fig(fig, 70 * len(rows) + 40)
+
+
 def gauge(title, val, lo, hi, ok_lo, ok_hi):
     bad, good = rgba(COLORS["Critical"], .35), rgba(COLORS["Normal"], .3)
     f = go.Figure(go.Indicator(mode="gauge+number", value=float(val), title={"text": title, "font": {"size": 14}},
@@ -161,7 +193,12 @@ def report_md():
          "## Samples by severity"] + [f"- {l}: {int(counts.get(l, 0))}" for l in LEVELS[::-1]]
     L += ["", f"## Incidents ({min_sev} and above)"]
     L += [f"- Incident {r.incident}: {r.max_severity}, {r.start:%H:%M:%S} for {r.duration_s} s, "
-          f"rules {r.rules}, status {r.status}" for r in inc.itertuples()] or ["- None"]
+          f"likely {r.likely_attack}, risk {r.max_risk:.0f}, rules {r.rules}, status {r.status}" for r in inc.itertuples()] or ["- None"]
+    kinds = sorted(set(inc["likely_attack"])) if len(inc) else []
+    if kinds:
+        L += ["", "## Suggested response (guidance for analysts)"]
+        for kd in kinds:
+            L += ["", f"### {kd}"] + [f"- {x}" for x in playbook_for(kd)]
     return "\n".join(L)
 
 
@@ -214,6 +251,28 @@ with tab_ov:
                               colorscale=[[0, PANEL], [1, ACCENT]], showscale=False))
     st.plotly_chart(style_fig(hm, 260), width="stretch")
     st.caption("Off-diagonal cells are where only one detector fires, which is why the two are combined.")
+    st.subheader("Rule activity over time")
+    bucket = res.index // max(1, n // 300)
+    act = pd.DataFrame({k: res["rules_triggered"].str.contains(k, regex=False) for k in RULES}).groupby(bucket).max()
+    ts0 = res["timestamp"].groupby(bucket).first()
+    ra = go.Figure(go.Heatmap(z=act.T.astype(int).values, x=ts0.values, y=list(RULES), showscale=False,
+                              colorscale=[[0, PANEL], [1, COLORS["High"]]], hovertemplate="%{x}<br>%{y}<extra></extra>"))
+    st.plotly_chart(style_fig(ra, 340).update_yaxes(autorange="reversed"), width="stretch")
+    st.caption("Each row is a rule. Coloured cells show when it fired, so you can see which rules catch which event.")
+    alert = res["final_severity"] != "Normal"
+    health = 100 * (1 - alert.rolling(60, min_periods=1).mean())
+    h1, h2 = st.columns([1, 3])
+    h1.metric("Samples with no alert", f"{100 * (1 - alert.mean()):.1f}%")
+    hf = go.Figure(go.Scatter(x=res["timestamp"], y=health, mode="lines", line=dict(color=COLORS["Normal"]),
+                              fill="tozeroy", fillcolor=rgba(COLORS["Normal"], .15)))
+    h2.plotly_chart(style_fig(hf, 200).update_yaxes(range=[0, 100], title="Feeder health %"), width="stretch")
+    with st.expander("Data quality check"):
+        q = st.columns(4)
+        q[0].metric("Rows", f"{dq['rows']:,}")
+        q[1].metric("Missing values", dq["missing_values"])
+        q[2].metric("Duplicate or out-of-order times", dq["duplicate_timestamps"] + dq["out_of_order"])
+        q[3].metric("Time gaps", dq["gaps"])
+        st.caption(f"Typical sample interval: {dq['median_interval_s']:.2f} s. Bad rows are dropped and rows are sorted by time before analysis.")
     st.download_button("Download summary report", report_md(), "voltguard_report.md")
 
 # ---- live replay (dynamic view) --------------------------------------------
@@ -241,7 +300,7 @@ with tab_live:
         w = res.iloc[max(0, pos - win + 1): pos + 1]
         sev = row["final_severity"]
         st.markdown(f"""<div class="vg-banner" style="--c:{COLORS[sev]};--bg:{rgba(COLORS[sev], .12)}">
-<div class="vg-head">{sev} at {row['timestamp']:%H:%M:%S}</div>
+<div class="vg-head">{sev} at {row['timestamp']:%H:%M:%S}, risk {row['risk_score']:.0f}/100</div>
 <div class="vg-sub">{row['alert_reason'] or 'All readings within limits.'}</div></div>""", unsafe_allow_html=True)
         st.progress(pos / max(n - 1, 1), text=f"Sample {pos + 1:,} of {n:,}" + ("  (end of data)" if pos >= n - 1 else ""))
         g = st.columns(4)
@@ -262,6 +321,9 @@ with tab_tl:
     lab = st.selectbox("Signal", list(SIGNALS), key="tl_sig")
     st.plotly_chart(timeline_fig(res, SIGNALS[lab], lab, 520), width="stretch")
     st.caption("The colour strip shows alert severity over time. Dashed lines are the physics limits.")
+    st.subheader("Which detector sees what")
+    st.plotly_chart(strips_fig(res), width="stretch")
+    st.caption("Where the AI strip is empty but physics lights up (or the reverse), you can see why the two are combined.")
 
 # ---- incidents -------------------------------------------------------------
 with tab_inc:
@@ -275,6 +337,8 @@ with tab_inc:
             "duration_s": st.column_config.NumberColumn("Seconds"),
             "alert_samples": st.column_config.NumberColumn("Alert samples"),
             "max_severity": st.column_config.TextColumn("Severity"),
+            "likely_attack": st.column_config.TextColumn("Likely attack", width="medium"),
+            "max_risk": st.column_config.ProgressColumn("Peak risk", min_value=0, max_value=100, format="%d"),
             "rules": st.column_config.TextColumn("Rules triggered", width="large"),
             "avg_ai_score": st.column_config.ProgressColumn("Avg AI score", min_value=0, max_value=1, format="%.2f"),
             "status": st.column_config.TextColumn("Analyst status")})
@@ -303,6 +367,11 @@ with tab_inc:
             f3.add_vrect(x0=row["start"], x1=row["end"], fillcolor=COLORS[row["max_severity"]],
                          opacity=0.18, line_width=0, row=k, col=1)
         st.plotly_chart(style_fig(f3, 620), width="stretch")
+        st.markdown(f"**Likely attack type:** {row['likely_attack']}  (peak risk {row['max_risk']:.0f}/100)")
+        with st.expander("Suggested response steps"):
+            for step_txt in playbook_for(row["likely_attack"]):
+                st.markdown(f"- {step_txt}")
+            st.caption("Guidance for an analyst in an exercise. Nothing here controls equipment.")
         st.markdown("**Why it was flagged**")
         for r in [r for r in inside["physics_reason"].unique() if r]:
             st.markdown(f"- Physics: {r}")
@@ -347,5 +416,25 @@ with tab_ev:
         if bt is not None:
             st.subheader("Share of each attack type detected")
             st.dataframe(bt, width="stretch", hide_index=True)
+        sw = threshold_sweep(res)
+        st.subheader("How the AI threshold changes the result")
+        metric = st.selectbox("Metric", ["f1", "precision", "recall"])
+        fs = go.Figure()
+        for mname, g in sw.groupby("method", sort=False):
+            fs.add_trace(go.Scatter(x=g["threshold"], y=g[metric], mode="lines+markers", name=mname))
+        fs.add_vline(x=thr, line_dash="dash", line_color=MUTED)
+        st.plotly_chart(style_fig(fs, 320).update_yaxes(range=[0, 1.02]), width="stretch")
+        st.caption("Dashed line = current threshold. 'Any alert' counts AI-only alerts; 'High and above' needs physics support.")
+        seg, summ = evaluate_incidents(res, build_incidents(res, min_sev, int(gap)))
+        st.subheader("Per attack (incident level)")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Attacks detected", f"{summ['detected']} of {summ['attacks']}")
+        m2.metric("Named correctly", f"{summ['correctly_named']} of {summ['attacks']}")
+        m3.metric("Average delay", f"{summ['mean_delay_s']:.1f} s")
+        m4.metric("False-alarm incidents", summ["false_alarm_incidents"])
+        st.dataframe(seg, width="stretch", hide_index=True, column_config={
+            "start": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
+            "end": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+            "delay_s": st.column_config.NumberColumn("Delay (s)", format="%.0f")})
         st.caption("Limits: synthetic data, rules written with these attacks in mind (physics-only is "
                    "optimistic), and scores are per sample, not per incident.")
