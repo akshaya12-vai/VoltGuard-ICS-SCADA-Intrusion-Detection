@@ -16,6 +16,10 @@ PLAYBOOK = {
         "T0832 Manipulation of View",
         "Compare reported power with V x I x pf from an independent source; inspect the "
         "RTU/gateway for tampering; treat displayed values as untrusted until verified."),
+    "Slow power drift": (
+        "T0832 Manipulation of View",
+        "Trend reported power against V x I x pf over a longer period; recalibrate or replace the "
+        "power meter and check its firmware; treat the reading as untrusted until verified."),
     "Process parameter manipulation": (
         "T0836 Modify Parameter",
         "Check setpoint / tap-changer changes and configuration diffs; reduce load or trip "
@@ -34,13 +38,15 @@ BASE = {"Low": 20, "Medium": 40, "High": 65, "Critical": 85}
 
 def classify(rules):
     """Rule signature -> attack type (checked in priority order)."""
+    rules = set(rules)
     if "R7_BREAKER_OPEN_FLOW" in rules: return "Breaker manipulation"
     if "R9_FROZEN_SENSOR" in rules: return "Replay / frozen sensor"
-    if "R6_POWER_MISMATCH" in rules and not rules & {"R1_VOLTAGE_RANGE", "R4_OVERTEMP"}:
-        return "False data injection"
+    volt_or_heat = rules & {"R1_VOLTAGE_RANGE", "R4_OVERTEMP"}
+    if "R6_POWER_MISMATCH" in rules and not volt_or_heat: return "False data injection"
+    if "R10_POWER_DRIFT" in rules and not volt_or_heat: return "Slow power drift"
     if rules & {"R1_VOLTAGE_RANGE", "R2_FREQUENCY_RANGE", "R3_OVERCURRENT", "R4_OVERTEMP"}:
         return "Process parameter manipulation"
-    if rules: return "Anomalous process behaviour"
+    if rules & {r for r in rules if r.startswith("R")}: return "Anomalous process behaviour"
     return "Suspicious traffic (no physical impact)"
 
 
@@ -65,10 +71,12 @@ def enrich_incidents(inc, res):
                     f"breaker open samples {int((seg.breaker_status == 0).sum())}")
         mitre, action = PLAYBOOK[atype]
         out.append({"attack_type": atype,
-                    "risk_score": risk_score(r["max_severity"], int(r["samples"]), r["avg_ai_score"]),
-                    "mitre_ics": mitre, "duration_s": int(r["samples"]),
+                    "risk_score": int(r["max_risk"]) if "max_risk" in inc.columns else
+                    risk_score(r["max_severity"], int(r.get("alert_samples", r.get("samples", 1))), r["avg_ai_score"]),
+                    "mitre_ics": mitre, "duration_s": int(r.get("duration_s", r.get("alert_samples", r.get("samples", 1)))),
                     "evidence": evidence, "recommended_action": action})
-    return pd.concat([inc.reset_index(drop=True), pd.DataFrame(out)], axis=1)
+    base = inc.drop(columns=[c for c in cols if c in inc.columns]).reset_index(drop=True)
+    return pd.concat([base, pd.DataFrame(out)], axis=1)
 
 
 def generate_report(res, ei, source="", threshold=0.5):

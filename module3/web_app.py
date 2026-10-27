@@ -97,8 +97,9 @@ def compute(src, thr, seed, split, cfg_items, up_bytes):
         df, info = simulate(seed=seed), {"fallback": str(e)}
     try:
         res = run_pipeline(df, thr, dict(cfg_items))
-    except TypeError:
-        res = run_pipeline(df, thr)
+    except ValueError as e:
+        df, info = simulate(seed=seed), {"fallback": str(e)}
+        res = run_pipeline(df, thr, dict(cfg_items))
     inc = build_incidents(res)
     return res, ia.enrich_incidents(inc, res), info
 
@@ -391,7 +392,7 @@ def page_alerts():
 
     with t3:
         rows = []
-        for rid, (sv, desc) in RULES.items():
+        for rid, (sv, desc, *_) in RULES.items():
             m_ = res["rules_triggered"].str.contains(rid)
             rows.append({"rule": rid, "severity (1-4)": sv, "description": desc, "violations": int(m_.sum()),
                          "first seen": res.loc[m_, "timestamp"].min() if m_.any() else None})
