@@ -1,7 +1,7 @@
 Feature_Name,Data_Type,Description
-Timestamp,datetime,Exact timestamp of the sensor reading
-Tank_Water_Level,float,"Water level in meters (Normal: 40-60, Violation > 70)"
-Pressure_Sensor,float,System pressure in PSI
-Flow_Rate,float,Liquid flow rate through pipes
+Timestamp,datetime,Timestamp of the simulated sensor reading
+Tank_Water_Level,float,Simulated water level; attack records use elevated values
+Pressure_Sensor,float,Simulated process pressure in PSI
+Flow_Rate,float,Simulated liquid flow rate
 Valve_Status,int,"Valve state (0: Closed, 1: Open)"
-Attack_Label,int,"Classification label (0: Normal, 1: Intrusion/Attack)"
+Attack_Label,int,"Label (0: Normal, 1: Simulated attack)"
