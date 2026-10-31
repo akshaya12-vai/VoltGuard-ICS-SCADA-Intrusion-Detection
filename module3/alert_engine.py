@@ -18,7 +18,9 @@ import incident_analysis as ia
 LEVELS = ["Normal", "Low", "Medium", "High", "Critical"]
 TRUE_NAME = {"false_data_injection": "False data injection", "breaker_manipulation": "Breaker manipulation",
              "replay_frozen_sensor": "Replay / frozen sensor", "overvoltage_injection": "Process parameter manipulation",
-             "slow_power_drift": "Slow power drift"}
+             "slow_power_drift": "Slow power drift",
+             "module1_attack": "Overflow / over-pressure attack", "sustained_overflow": "Overflow / over-pressure attack",
+             "valve_spoof": "Valve / flow spoofing", "inconsistent_sensors": "Sensor spoofing (inconsistent readings)"}
 INC_COLS = ["incident", "start", "end", "duration_s", "alert_samples", "max_severity", "rules",
             "avg_ai_score", "likely_attack", "max_risk"]
 
@@ -45,10 +47,13 @@ def join_module2(proc, m2, tolerance="1s"):
     return j.reset_index(drop=True)
 
 
-def run_pipeline(df, ai_threshold=0.5, cfg=None, disabled=()):
-    d = validate_input(df)
+def run_pipeline(df, ai_threshold=0.5, cfg=None, disabled=(), profile=None):
+    """profile = a rules module (e.g. tank_rules) with validate_input/apply_rules/CONFIG; default = 11 kV feeder."""
+    vi, ar, base_cfg = (validate_input, apply_rules, CONFIG) if profile is None else \
+        (profile.validate_input, profile.apply_rules, profile.CONFIG)
+    d = vi(df)
     dropped = d.attrs.get("dropped_rows", 0)
-    d = apply_rules(d, CONFIG if cfg is None else cfg, tuple(disabled or ()))
+    d = ar(d, base_cfg if cfg is None else cfg, tuple(disabled or ()))
     if "ai_score" not in d:
         d["ai_score"] = 0.0
     d["ai_flag"] = d["ai_score"] >= ai_threshold

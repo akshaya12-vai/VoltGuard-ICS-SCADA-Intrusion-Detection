@@ -16,6 +16,21 @@ PLAYBOOK = {
         "T0832 Manipulation of View",
         "Compare reported power with V x I x pf from an independent source; inspect the "
         "RTU/gateway for tampering; treat displayed values as untrusted until verified."),
+    "Valve / flow spoofing": (
+        "T0855 Unauthorized Command Message",
+        "Check the valve position locally and compare with the flow meter; review recent valve commands "
+        "and PLC logins; isolate the control network segment if the command was not authorised."),
+    "Sensor spoofing (inconsistent readings)": (
+        "T0856 Spoof Reporting Message",
+        "Compare level and pressure with an independent gauge; check which sensor or gateway is "
+        "reporting wrong values; treat both readings as untrusted until verified."),
+    "Overflow / over-pressure attack": (
+        "T0831 Manipulation of Control",
+        "Check the inlet valve and pump commands; reduce inflow or open the relief path per operating "
+        "procedure; escalate to the plant engineer and review recent control changes."),
+    "Loss of level / pressure": (
+        "No direct mapping",
+        "Check for leaks, pump failure or a failed sensor; confirm readings with a local gauge."),
     "Slow power drift": (
         "T0832 Manipulation of View",
         "Trend reported power against V x I x pf over a longer period; recalibrate or replace the "
@@ -36,9 +51,21 @@ PLAYBOOK = {
 BASE = {"Low": 20, "Medium": 40, "High": 65, "Critical": 85}
 
 
+def _classify_tank(rules):
+    if "T8_VALVE_CLOSED_FLOW" in rules: return "Valve / flow spoofing"
+    if "T9_FROZEN_SENSORS" in rules: return "Replay / frozen sensor"
+    if rules & {"T1_LEVEL_HIGH", "T4_PRESSURE_HIGH"}: return "Overflow / over-pressure attack"
+    if "T7_LEVEL_PRESSURE_MISMATCH" in rules and not rules & {"T2_LEVEL_LOW", "T5_PRESSURE_LOW"}:
+        return "Sensor spoofing (inconsistent readings)"
+    if rules & {"T2_LEVEL_LOW", "T5_PRESSURE_LOW"}: return "Loss of level / pressure"
+    return "Anomalous process behaviour"
+
+
 def classify(rules):
     """Rule signature -> attack type (checked in priority order)."""
     rules = set(rules)
+    if any(r.startswith("T") for r in rules):
+        return _classify_tank(rules)
     if "R7_BREAKER_OPEN_FLOW" in rules: return "Breaker manipulation"
     if "R9_FROZEN_SENSOR" in rules: return "Replay / frozen sensor"
     volt_or_heat = rules & {"R1_VOLTAGE_RANGE", "R4_OVERTEMP"}
@@ -62,13 +89,20 @@ def enrich_incidents(inc, res):
     out = []
     for _, r in inc.iterrows():
         seg = res[(res["timestamp"] >= r["start"]) & (res["timestamp"] <= r["end"])]
-        rules = {x.strip() for x in str(r["rules"]).split(",") if x.strip().startswith("R")}
+        rules = {x.strip() for x in str(r["rules"]).split(",") if x.strip()[:1] in ("R", "T")}
         atype = classify(rules)
-        gap = (seg["power_mw"] - seg["power_calc_mw"]).abs().max()
-        evidence = (f"I {seg.current_a.min():.0f}-{seg.current_a.max():.0f} A | "
-                    f"V {seg.voltage_kv.min():.2f}-{seg.voltage_kv.max():.2f} kV | "
-                    f"T max {seg.transformer_temp_c.max():.0f} C | power gap max {gap:.2f} MW | "
-                    f"breaker open samples {int((seg.breaker_status == 0).sum())}")
+        if "Tank_Water_Level" in seg.columns:
+            gap = (seg["Pressure_Sensor"] - seg["expected_pressure"]).abs().max()
+            evidence = (f"level {seg.Tank_Water_Level.min():.0f}-{seg.Tank_Water_Level.max():.0f} | "
+                        f"pressure {seg.Pressure_Sensor.min():.0f}-{seg.Pressure_Sensor.max():.0f} PSI | "
+                        f"flow {seg.Flow_Rate.min():.1f}-{seg.Flow_Rate.max():.1f} | "
+                        f"valve closed samples {int((seg.Valve_Status == 0).sum())} | max pressure gap {gap:.1f} PSI")
+        else:
+            gap = (seg["power_mw"] - seg["power_calc_mw"]).abs().max()
+            evidence = (f"I {seg.current_a.min():.0f}-{seg.current_a.max():.0f} A | "
+                        f"V {seg.voltage_kv.min():.2f}-{seg.voltage_kv.max():.2f} kV | "
+                        f"T max {seg.transformer_temp_c.max():.0f} C | power gap max {gap:.2f} MW | "
+                        f"breaker open samples {int((seg.breaker_status == 0).sum())}")
         mitre, action = PLAYBOOK[atype]
         out.append({"attack_type": atype,
                     "risk_score": int(r["max_risk"]) if "max_risk" in inc.columns else

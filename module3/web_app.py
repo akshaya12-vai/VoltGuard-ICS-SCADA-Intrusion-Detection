@@ -19,6 +19,8 @@ try:
     from physics_rules import RULES, CONFIG
     import integration as itg
     import incident_analysis as ia
+    import tank_rules as tk
+    import tank_data as td
 except ImportError as e:
     st.error(f"Missing module: {e}. Copy integration.py and incident_analysis.py into module3/.")
     st.stop()
@@ -29,6 +31,8 @@ COLORS = {"Normal": "#22c55e", "Low": "#38bdf8", "Medium": "#eab308",
 SRC_M2 = "Module 2 output (agreed 11 kV dataset)"
 SRC_SIM = "Simulated (mock AI)"
 SRC_UP = "Upload CSV"
+PROFILE_TANK = "Water tank (Module 1/2 data)"
+PROFILE_FEEDER = "11 kV feeder (simulation)"
 
 st.markdown("""<style>
 .block-container{padding-top:1.4rem;max-width:1320px}
@@ -82,10 +86,12 @@ def check_schema(df):
 
 
 @st.cache_data(show_spinner="Running detection pipeline...")
-def compute(src, thr, seed, split, cfg_items, up_bytes):
-    info = {}
+def compute(profile, src, thr, seed, split, stress, cfg_items, up_bytes):
+    info, use_tank = {}, profile == PROFILE_TANK
     try:
-        if src == SRC_M2:
+        if use_tank:
+            df, info = td.load(split, stress, seed)          # Module 1 files + Module 2 real model
+        elif src == SRC_M2:
             df = pd.read_csv(itg.PATHS["m2out"], parse_dates=["timestamp"])
             check_schema(df)
         elif src == SRC_UP and up_bytes:
@@ -94,12 +100,13 @@ def compute(src, thr, seed, split, cfg_items, up_bytes):
         else:
             df = simulate(seed=seed)
     except Exception as e:  # missing teammate files etc.
-        df, info = simulate(seed=seed), {"fallback": str(e)}
+        df, info, use_tank = simulate(seed=seed), {"fallback": str(e)}, False
+    cfg = dict(cfg_items) if (use_tank or profile != PROFILE_TANK) else None
     try:
-        res = run_pipeline(df, thr, dict(cfg_items))
+        res = run_pipeline(df, thr, cfg, profile=tk if use_tank else None)
     except ValueError as e:
         df, info = simulate(seed=seed), {"fallback": str(e)}
-        res = run_pipeline(df, thr, dict(cfg_items))
+        res = run_pipeline(df, thr)
     inc = build_incidents(res)
     return res, ia.enrich_incidents(inc, res), info
 
@@ -126,25 +133,42 @@ def metrics_at(y, score, t):
 with st.sidebar:
     st.markdown("### ⚡ VoltGuard")
     st.caption("Physics-aware ICS/SCADA intrusion detection")
-    src = st.radio("Data source", [SRC_M2, SRC_SIM, SRC_UP], key="src")
-    split, up_bytes = "test", None
-    if src == SRC_UP:
-        up = st.file_uploader("CSV with process columns + ai_score", type="csv")
-        up_bytes = up.getvalue() if up else None
-        if not up:
-            st.info("No file yet, showing simulated data.")
+    profile = st.radio("Process", [PROFILE_TANK, PROFILE_FEEDER], key="profile",
+                       help="Water tank = Module 1's dataset scored by Module 2's model.")
+    split, up_bytes, stress, src = "test", None, False, SRC_SIM
+    if profile == PROFILE_TANK:
+        split = st.selectbox("Module 1 data", ["test", "train", "clean"], key="tsplit",
+                             format_func={"test": "Test split (1000 rows)", "train": "Train split",
+                                          "clean": "Cleaned dataset (all)"}.get)
+        stress = st.checkbox("Add Module 3 stress-test attacks", value=False,
+                             help="Adds 4 sustained, labelled attacks (inconsistent sensors, valve spoof, "
+                                  "replay, overflow) to test the physics layer. Modules 1/2 files are not changed.")
+        src = "Module 1 files + Module 2 model"
+    else:
+        src = st.radio("Data source", [SRC_M2, SRC_SIM, SRC_UP], key="src")
+        if src == SRC_UP:
+            up = st.file_uploader("CSV with process columns + ai_score", type="csv")
+            up_bytes = up.getvalue() if up else None
+            if not up:
+                st.info("No file yet, showing simulated data.")
     thr = st.slider("AI score threshold", 0.1, 0.95, 0.5, 0.05, key="thr")
     seed = int(st.number_input("Random seed", 0, 9999, 42, key="seed"))
     with st.expander("Physics thresholds (what-if)"):
-        tol = st.slider("Voltage tolerance ±%", 1.0, 10.0, 5.0, 0.5)
-        imax = st.slider("Current limit (A)", 250, 600, int(CONFIG["i_max"]), 10)
-        tmax = st.slider("Temperature limit (°C)", 60, 110, int(CONFIG["temp_max"]))
-        ptol = st.slider("Power mismatch tolerance (MW)", 0.1, 1.5, float(CONFIG["power_tol_mw"]), 0.05)
-    cfg = dict(CONFIG)
-    cfg.update(v_min=11 * (1 - tol / 100), v_max=11 * (1 + tol / 100), i_max=float(imax),
-               temp_max=float(tmax), power_tol_mw=float(ptol))
+        if profile == PROFILE_TANK:
+            vals = {k: float(st.slider(lbl, lo, hi, int(tk.CONFIG[k]), step)) for k, lbl, lo, hi, step in tk.WHATIF}
+            cfg = dict(tk.CONFIG, **vals)
+        else:
+            tol = st.slider("Voltage tolerance ±%", 1.0, 10.0, 5.0, 0.5)
+            imax = st.slider("Current limit (A)", 250, 600, int(CONFIG["i_max"]), 10)
+            tmax = st.slider("Temperature limit (°C)", 60, 110, int(CONFIG["temp_max"]))
+            ptol = st.slider("Power mismatch tolerance (MW)", 0.1, 1.5, float(CONFIG["power_tol_mw"]), 0.05)
+            cfg = dict(CONFIG)
+            cfg.update(v_min=11 * (1 - tol / 100), v_max=11 * (1 + tol / 100), i_max=float(imax),
+                       temp_max=float(tmax), power_tol_mw=float(ptol))
 
-res, ei, info = compute(src, thr, seed, split, tuple(sorted(cfg.items())), up_bytes)
+res, ei, info = compute(profile, src, thr, seed, split, stress, tuple(sorted(cfg.items())), up_bytes)
+TANK = "Tank_Water_Level" in res.columns          # which process the results actually are
+RULES_ACTIVE = tk.RULES if TANK else RULES
 if "fallback" in info:
     st.sidebar.warning(f"Module 1/2 files not usable, using simulation. ({info['fallback'][:90]})")
 
@@ -169,6 +193,13 @@ def page_overview():
            ("Highest risk", int(ei["risk_score"].max()) if len(ei) else 0, "out of 100", "#f97316"),
            ("Caught only by physics", phys_only if phys_only is not None else "n/a",
             "attack samples the AI missed", "#a78bfa")])
+    st.write("")
+    st.subheader("Pipeline connection check")
+    chk = pd.DataFrame([{"": "✅" if ok else "❌", "Check": c, "Detail": d} for c, ok, d in itg.compatibility_report(tank=TANK)])
+    st.dataframe(chk, width="stretch", hide_index=True)
+    if TANK and not stress:
+        st.info("On Module 1's data alone, AI and physics both detect its simple attacks. Tick "
+                "**Add Module 3 stress-test attacks** in the sidebar to see what the physics rules add.")
     st.write("")
     ok1 = all(itg.PATHS[k].exists() for k in ("clean", "train", "test", "dictionary"))
     ok2 = itg.PATHS["model"].exists()
@@ -343,27 +374,29 @@ def page_alerts():
         lo, hi = st.slider("Time window", ts.min().to_pydatetime(), ts.max().to_pydatetime(),
                            (ts.min().to_pydatetime(), ts.max().to_pydatetime()))
         w = res[(ts >= lo) & (ts <= hi)]
-        sig = [("current_a", "Current (A)"), ("voltage_kv", "Voltage (kV)"), ("power_mw", "Power (MW)"),
-               ("transformer_temp_c", "Temp (°C)"), ("ai_score", "AI score")]
-        fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=.025,
+        sig = (tk.SIGNALS if TANK else [("current_a", "Current (A)"), ("voltage_kv", "Voltage (kV)"),
+                                        ("power_mw", "Power (MW)"), ("transformer_temp_c", "Temp (°C)")]) \
+            + [("ai_score", "AI score")]
+        fig = make_subplots(rows=len(sig), cols=1, shared_xaxes=True, vertical_spacing=.025,
                             subplot_titles=[s[1] for s in sig])
         for i, (c, _) in enumerate(sig, 1):
             fig.add_trace(go.Scatter(x=w.timestamp, y=w[c], line=dict(color="#64748b", width=1), showlegend=False), row=i, col=1)
             for lvl in ["Low", "Medium", "High", "Critical"]:
                 s = w[w.final_severity == lvl]
-                if len(s) and (c != "ai_score" or lvl == "Low" or True):
+                if len(s):
                     fig.add_trace(go.Scatter(x=s.timestamp, y=s[c], mode="markers", name=lvl, legendgroup=lvl,
                                              showlegend=(i == 1), marker=dict(color=COLORS[lvl], size=4),
                                              text=s.alert_reason, hoverinfo="text+x+y"), row=i, col=1)
-        fig.add_trace(go.Scatter(x=w.timestamp, y=w.power_calc_mw, line=dict(color=ACCENT, width=1, dash="dot"),
-                                 name="V·I·pf (expected)"), row=3, col=1)
-        fig.add_hline(y=thr, line_dash="dash", line_color="#64748b", row=5, col=1)
+        oc, ec, on = tk.OVERLAY if TANK else ("power_mw", "power_calc_mw", "V·I·pf (expected)")
+        fig.add_trace(go.Scatter(x=w.timestamp, y=w[ec], line=dict(color=ACCENT, width=1, dash="dot"), name=on),
+                      row=[s[0] for s in sig].index(oc) + 1, col=1)
+        fig.add_hline(y=thr, line_dash="dash", line_color="#64748b", row=len(sig), col=1)
         for _, r in ei[ei.max_severity.isin(["Medium", "High", "Critical"])].iterrows():
             if r["end"] >= lo and r["start"] <= hi:
                 fig.add_vrect(x0=r["start"], x1=r["end"], fillcolor=COLORS[r["max_severity"]], opacity=.13,
                               line_width=0, row="all", col=1)
-        st.plotly_chart(style(fig, 820), width="stretch")
-        st.caption("Shaded bands = Medium+ incidents. Dotted line on Power = value expected from voltage × current × power factor.")
+        st.plotly_chart(style(fig, 170 * len(sig)), width="stretch")
+        st.caption("Shaded bands = Medium+ incidents. Dotted line = value the physics expects (power from V×I×pf, or pressure from tank level).")
 
     with t2:
         if ei.empty:
@@ -392,7 +425,7 @@ def page_alerts():
 
     with t3:
         rows = []
-        for rid, (sv, desc, *_) in RULES.items():
+        for rid, (sv, desc, *_) in RULES_ACTIVE.items():
             m_ = res["rules_triggered"].str.contains(rid)
             rows.append({"rule": rid, "severity (1-4)": sv, "description": desc, "violations": int(m_.sum()),
                          "first seen": res.loc[m_, "timestamp"].min() if m_.any() else None})

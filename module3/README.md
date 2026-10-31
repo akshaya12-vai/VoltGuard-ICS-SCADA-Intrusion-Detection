@@ -1,29 +1,30 @@
 # VoltGuard – Module 3: Physics-Aware Analysis & Alert Dashboard
 
-## One-time setup (inside module3/)
+Module 3 adapts to Modules 1 and 2 (they are NOT changed):
+- Module 1: `data/processed/*.csv` (water tank: Tank_Water_Level, Pressure_Sensor, Flow_Rate, Valve_Status, Attack_Label)
+- Module 2: `models/random_forest.joblib` (scores those 4 columns)
+- Module 3: water-tank physics rules (T1-T9) + the real Module 2 `ai_score` -> alerts, incidents, dashboard
+
+## Setup (inside module3/)
     python3 -m venv .venv && source .venv/bin/activate
     python -m pip install -r requirements.txt
 
-## Run order (everything connected)
-    python generate_dataset.py       # 1. common 11 kV dataset  -> data/feeder/train.csv, test.csv
-    python module2_train_predict.py  # 2. Module 2 model + ai_score -> data/feeder/module2_output.csv
-    streamlit run web_app.py         # 3a. full site: Overview, Module 1, Module 2, Module 3 pages
-    streamlit run app.py             # 3b. analyst dashboard (live replay, incident triage, ablation)
-    python run_pipeline.py [process.csv [module2.csv]]   # CLI -> alerts/incidents/review_queue CSVs
-    pytest -q                        # 20 tests
+## Run (teammates' scripts first, from the repo root)
+    python scripts/preprocessing.py   # Module 1 (unchanged)
+    python scripts/train_model.py     # Module 2 (unchanged)
+    cd module3
+    streamlit run web_app.py          # Overview shows a connection check; default process = Water tank
+    pytest -q                         # 28 tests
 
-## How the files connect
-    simulate_process.py  -> common dataset (process + traffic columns), hard attack, inject_attack
-    generate_dataset.py  -> data/feeder/*.csv + data dictionary + dataset report (Module 1 view)
-    module2_train_predict.py -> trains on traffic columns, writes module2_output.csv (Module 2)
-    physics_rules.py     -> rules R1-R10, validate_input, data_quality
-    alert_engine.py      -> fuse AI + physics, incidents, evaluation, review queue, join_module2
-    incident_analysis.py -> attack type, MITRE ICS mapping, response steps, report
-    integration.py       -> loads Module 1/2 files for the web_app pages
-    web_app.py / app.py  -> the two dashboards
+In the sidebar: "Water tank (Module 1/2 data)" uses their files; tick "Add Module 3 stress-test attacks"
+to add 4 labelled, sustained attacks that a threshold model cannot see (physics rules catch them).
+"11 kV feeder (simulation)" is the earlier simulated demo (also: `streamlit run app.py`).
 
-## Agreed data format (Module 2 output)
-timestamp, voltage_kv, current_a, frequency_hz, power_mw, power_factor,
-transformer_temp_c, breaker_status, ai_score   (extra columns such as true_attack are fine)
+## Files
+    tank_rules.py   water-tank physics rules T1-T9 (RULES_TANK.md lists thresholds and rationale)
+    tank_data.py    reads Module 1 files + Module 2 model (read-only), adds ai_score, optional stress tests
+    alert_engine.py fusion AI + physics, incidents, evaluation   | incident_analysis.py attack type, MITRE ICS, response
+    integration.py  paths + connection check                     | web_app.py multi-page dashboard
+    physics_rules.py / simulate_process.py / app.py   11 kV feeder simulation profile
 
 Offline/simulated data only. Do not connect to live control equipment.

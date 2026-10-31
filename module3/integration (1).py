@@ -8,22 +8,17 @@ import pandas as pd
 from simulate_process import simulate
 
 ROOT = Path(os.environ.get("VOLTGUARD_ROOT", Path(__file__).resolve().parent.parent))
-def _first(*paths):
-    return next((p for p in paths if p.exists()), paths[0])
-
-
-F = ROOT / "data/feeder"
-PATHS = {  # the agreed 11 kV dataset is used when present, else the old files
-    "clean": _first(F / "cleaned.csv", ROOT / "data/processed/cleaned_dataset.csv"),
-    "train": _first(F / "train.csv", ROOT / "data/processed/train_data.csv"),
-    "test": _first(F / "test.csv", ROOT / "data/processed/test_data.csv"),
-    "model": _first(ROOT / "models/random_forest_feeder.joblib", ROOT / "models/random_forest.joblib"),
-    "dictionary": _first(ROOT / "reports/feeder_data_dictionary.csv", ROOT / "reports/data_dictionary.csv"),
-    "eval": _first(ROOT / "reports/feeder_model_evaluation.txt", ROOT / "reports/model_evaluation.txt"),
-    "prep": _first(ROOT / "reports/feeder_dataset_report.txt", ROOT / "reports/preprocessing_report.txt"),
-    "m2out": F / "module2_output.csv",
+PATHS = {  # the team layout: data/processed, models, reports
+    "clean": ROOT / "data/processed/cleaned_dataset.csv",
+    "train": ROOT / "data/processed/train_data.csv",
+    "test": ROOT / "data/processed/test_data.csv",
+    "model": ROOT / "models/random_forest.joblib",
+    "dictionary": ROOT / "reports/data_dictionary.csv",
+    "eval": ROOT / "reports/model_evaluation.txt",
+    "prep": ROOT / "reports/preprocessing_report.txt",
+    "m2out": ROOT / "data/processed/module2_output.csv",
 }
-LABEL_CANDIDATES = ["true_attack", "label", "Label", "class", "Class", "target", "Target", "attack",
+LABEL_CANDIDATES = ["true_attack", "Attack_Label", "label", "Label", "class", "Class", "target", "Target", "attack",
                     "Attack", "attack_cat", "Attack_Type", "binary_label", "marker"]
 NORMAL_NAMES = {"0", "0.0", "normal", "benign", "false", "no attack", "no_attack", "natural"}
 
@@ -107,3 +102,44 @@ def build_integrated(n=3000, seed=42, split="test"):
         info["note"] = "No label column found - traffic replayed sequentially."
     sim["ai_score"] = scores[idx]
     return sim, info
+
+
+MOD3_COLS = ["timestamp", "voltage_kv", "current_a", "frequency_hz", "power_mw", "power_factor",
+             "transformer_temp_c", "breaker_status"]
+
+
+TANK_COLS = ["Timestamp", "Tank_Water_Level", "Pressure_Sensor", "Flow_Rate", "Valve_Status"]
+
+
+def compatibility_report(tank=False):
+    """Do Module 1 data, the Module 2 model and Module 3 agree on columns? -> [(check, ok, detail)]"""
+    rows = []
+    test = read_csv("test")
+    need = TANK_COLS if tank else MOD3_COLS
+    rows.append(("Module 1 test data found", test is not None, PATHS["test"].name))
+    if test is not None:
+        miss = [c for c in need if c not in test.columns]
+        rows.append(("Module 1 data has the process columns Module 3 needs", not miss,
+                     "missing: " + ", ".join(miss) if miss else "all present"))
+        rows.append(("Module 1 data has a label column", find_label(test) is not None, str(find_label(test))))
+    try:
+        model = load_model()
+        feats = model_features(model, test if test is not None else pd.DataFrame(), None)
+        miss = [f for f in feats if test is None or f not in test.columns]
+        rows.append(("Module 2 model features exist in Module 1 data", not miss,
+                     f"{len(feats)} features: " + ", ".join(feats) if not miss else "model needs: " + ", ".join(miss)))
+        if tank and test is not None and not miss:
+            s = score_traffic(model, test.head(200), find_label(test))
+            rows.append(("Module 2 model scores Module 1 data (ai_score)", bool(np.isfinite(s).all()),
+                         f"{len(s)} rows scored, scores {s.min():.2f}-{s.max():.2f}"))
+    except Exception as e:
+        rows.append(("Module 2 model loads", False, str(e)[:80]))
+    if not tank:
+        out = read_csv("m2out", nrows=5)
+        if out is None:
+            rows.append(("Module 2 output (module2_output.csv) found", False, "run the Module 2 script"))
+        else:
+            miss = [c for c in MOD3_COLS + ["ai_score"] if c not in out.columns]
+            rows.append(("Module 2 output has the columns Module 3 needs", not miss,
+                         "missing: " + ", ".join(miss) if miss else "timestamp + process columns + ai_score"))
+    return rows
