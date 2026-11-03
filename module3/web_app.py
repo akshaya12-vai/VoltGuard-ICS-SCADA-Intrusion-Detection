@@ -24,7 +24,7 @@ try:
     import tank_rules as tk
     import tank_data as td
 except ImportError as e:
-    st.error(f"Missing module: {e}. Copy all files from module3/ (integration.py, incident_analysis.py, tank_*.py).")
+    st.error(f"Missing or wrong module: {e}. In Terminal, inside module3/, run:  python check_install.py")
     st.stop()
 
 AMBER, INFO, TEXT, MUTED = "#ffb020", "#38bdf8", "#d6e2ee", "#7f93a7"
