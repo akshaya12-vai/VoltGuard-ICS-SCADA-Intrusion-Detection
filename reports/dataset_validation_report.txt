@@ -1,0 +1,27 @@
+
+VOLTGUARD DATASET VALIDATION REPORT
+=============================================
+Generated: 2026-11-07 15:04:15
+
+Total records : 5000
+Training rows : 4000
+Testing rows  : 1000
+Normal records: 4750
+Attack records: 250
+
+VALIDATION RESULTS
+---------------------------------------------
+[PASS] Required column validation
+[PASS] Missing value validation
+[PASS] Duplicate record validation
+[PASS] Numeric value validation
+[PASS] Attack label validation
+[PASS] Valve status validation
+[PASS] Timestamp validation
+[PASS] Train/test split validation
+
+Total checks: 8
+Passed      : 8
+Failed      : 0
+
+FINAL STATUS: PASSED
